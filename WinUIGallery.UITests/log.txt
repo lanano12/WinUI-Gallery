@@ -1,0 +1,1175 @@
+File: AxeHelper.cs
+﻿//******************************************************************************
+//
+// Copyright (c) 2024 Microsoft Corporation. All rights reserved.
+//
+// This code is licensed under the MIT License (MIT).
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+//
+//******************************************************************************
+
+using Axe.Windows.Automation;
+using Axe.Windows.Core.Enums;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using System.Diagnostics;
+using System.Linq;
+
+namespace WinUIGallery.UITests;
+
+public class AxeHelper
+{
+	public static IScanner AccessibilityScanner;
+
+	internal static void InitializeAxe()
+	{
+		var processes = Process.GetProcessesByName("WinUIGallery");
+		Assert.IsTrue(processes.Length > 0);
+
+		var config = Config.Builder.ForProcessId(processes[0].Id).Build();
+
+		AccessibilityScanner = ScannerFactory.CreateScanner(config);
+	}
+
+	public static void AssertNoAccessibilityErrors()
+	{
+	// Bug 1474: Disabling Rules NameReasonableLength and BoundingRectangleNotNull temporarily
+	var testResult = AccessibilityScanner.Scan(null).WindowScanOutputs.SelectMany(output => output.Errors)
+			.Where(rule => rule.Rule.ID != RuleId.NameIsInformative)
+			.Where(rule => rule.Rule.ID != RuleId.NameExcludesControlType)
+			.Where(rule => rule.Rule.ID != RuleId.NameExcludesLocalizedControlType)
+			.Where(rule => rule.Rule.ID != RuleId.SiblingUniqueAndFocusable)
+			.Where(rule => rule.Rule.ID != RuleId.NameReasonableLength)
+			.Where(rule => rule.Rule.ID != RuleId.BoundingRectangleNotNull)
+			.Where(rule => rule.Rule.ID != RuleId.BoundingRectangleNotNullListViewXAML)
+			.Where(rule => rule.Rule.ID != RuleId.BoundingRectangleNotNullTextBlockXAML)
+			.Where(rule => rule.Rule.ID != RuleId.NameNotNull)
+			.Where(rule => rule.Rule.ID != RuleId.ChromiumComponentsShouldUseWebScanner);
+
+	if (testResult.Any())
+		{
+			var mappedResult = testResult.Select(result =>
+			"Element " + result.Element.Properties["ControlType"] + " violated rule '" + result.Rule.Description + "'.");
+			Assert.Fail("Failed with the following accessibility errors \r\n" + string.Join("\r\n", mappedResult));
+		}
+	}
+}
+
+--- End of AxeHelper.cs ---
+
+File: SampleTestTemplate.cs
+﻿//******************************************************************************
+//
+// Copyright (c) 2024 Microsoft Corporation. All rights reserved.
+//
+// This code is licensed under the MIT License (MIT).
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+//
+//******************************************************************************
+
+using System.Threading;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using OpenQA.Selenium.Appium.Windows;
+
+namespace WinUIGallery.UITests;
+
+[TestClass]
+public class SampleTestTemplate : TestBase
+{
+
+	private static WindowsElement element1 = null;
+	private static WindowsElement element2 = null;
+
+	public static void ClassInitialize(TestContext context)
+	{
+		OpenControlPage("MyControlPage");
+		Thread.Sleep(1000);
+		element1 = Session.FindElementByAccessibilityId("Element Locator");
+		Assert.IsNotNull(element1);
+		element2 = Session.FindElementByAccessibilityId("Element Locator");
+		Assert.IsNotNull(element2);
+	}
+}
+
+--- End of SampleTestTemplate.cs ---
+
+File: SessionManager.cs
+﻿//******************************************************************************
+//
+// Copyright (c) 2024 Microsoft Corporation. All rights reserved.
+//
+// This code is licensed under the MIT License (MIT).
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+//
+//******************************************************************************
+
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Microsoft.VisualStudio.TestTools.UnitTesting.Logging;
+using OpenQA.Selenium;
+using OpenQA.Selenium.Appium;
+using OpenQA.Selenium.Appium.Windows;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Xml.Linq;
+
+namespace WinUIGallery.UITests;
+
+[TestClass]
+public class SessionManager
+{
+    private const string WindowsApplicationDriverUrl = "http://127.0.0.1:4723";
+    private static readonly string[] WinUIGalleryAppIDs = new string[]{
+        // WinUI 3 Gallery apps built in the lab
+        "Microsoft.WinUI3ControlsGallery.Debug_grv3cx5qrw0gp!App",
+        "Microsoft.WinUI3ControlsGallery_grv3cx5qrw0gp!App",
+        // WinUI 3 Gallery apps built locally
+        "Microsoft.WinUI3ControlsGallery.Debug_8wekyb3d8bbwe!App",
+        "Microsoft.WinUI3ControlsGallery_8wekyb3d8bbwe!App"
+    };
+
+    private static uint appIdIndex = 0;
+
+    private static WindowsDriver<WindowsElement> _session;
+    public static WindowsDriver<WindowsElement> Session
+    {
+        get
+        {
+            if (_session is null)
+            {
+                Setup(null);
+            }
+            return _session;
+        }
+    }
+
+    public static TestContext TestContext { get; set; }
+
+    private static string screenshotDirectory;
+
+    [AssemblyInitialize]
+    public static void Setup(TestContext context)
+    {
+        TestContext = context;
+
+        string outputDirectory;
+
+        if (context.Properties.Contains("ArtifactStagingDirectory"))
+        {
+            outputDirectory = context.Properties["ArtifactStagingDirectory"].ToString();
+        }
+        else
+        {
+            outputDirectory = context.TestRunResultsDirectory;
+        }
+
+        screenshotDirectory = Path.Combine(outputDirectory, "Screenshots");
+
+        if (_session is null)
+        {
+            int timeoutCount = 50;
+
+            TryInitializeSession();
+            if (_session is null)
+            {
+                // WinAppDriver is probably not running, so lets start it!
+                string winAppDriverX64Path = Path.Join(Environment.GetEnvironmentVariable("ProgramFiles"), "Windows Application Driver", "WinAppDriver.exe");
+                string winAppDriverX86Path = Path.Join(Environment.GetEnvironmentVariable("ProgramFiles(x86)"), "Windows Application Driver", "WinAppDriver.exe");
+
+                if (File.Exists(winAppDriverX64Path))
+                {
+                    Process.Start(winAppDriverX64Path);
+                }
+                else if (File.Exists(winAppDriverX86Path))
+                {
+                    Process.Start(winAppDriverX86Path);
+                }
+                else
+                {
+                    throw new Exception("Unable to start WinAppDriver since no suitable location was found.");
+                }
+
+                Thread.Sleep(10000);
+                TryInitializeSession();
+            }
+
+            while (_session is null && timeoutCount < 1000 * 4)
+            {
+                TryInitializeSession();
+                Thread.Sleep(timeoutCount);
+                timeoutCount *= 2;
+            }
+
+            Thread.Sleep(3000);
+            Assert.IsNotNull(_session);
+            Assert.IsNotNull(_session.SessionId);
+            AxeHelper.InitializeAxe();
+            
+            // Dismiss the disclaimer window that may pop up on the very first application launch
+            // If the disclaimer is not found, this throws an exception, so lets catch that
+            try
+            {
+                _session.FindElementByName("Disclaimer").FindElementByName("Accept").Click();
+            }
+            catch (OpenQA.Selenium.WebDriverException) { }
+
+            // Wait if something is still animating in the visual tree
+            _session.Manage().Timeouts().ImplicitWait = TimeSpan.FromSeconds(3);
+            _session.Manage().Window.Maximize();
+        }
+    }
+
+    [AssemblyCleanup()]
+    public static void TestRunTearDown()
+    {
+        TearDown();
+    }
+
+    public static void TearDown()
+    {
+        if (_session is not null)
+        {
+            _session.CloseApp();
+            _session.Quit();
+            _session = null;
+        }
+    }
+
+    public static void TakeScreenshot(string fileName)
+    {
+        Directory.CreateDirectory(screenshotDirectory);
+        _session.GetScreenshot().SaveAsFile(Path.Join(screenshotDirectory, $"{fileName}.png"));
+    }
+
+    public static void DumpTree()
+    {
+        Logger.LogMessage("=================");
+        Logger.LogMessage("Begin visual tree");
+        Logger.LogMessage("=================");
+
+        foreach (WindowsElement element in _session.FindElementsByXPath("/*"))
+        {
+            DumpTreeHelper(element, 0);
+        }
+
+        Logger.LogMessage("===============");
+        Logger.LogMessage("End visual tree");
+        Logger.LogMessage("===============");
+    }
+
+    private static void DumpTreeHelper(WindowsElement root, int depth)
+    {
+        string indent = string.Empty;
+
+        for (int i = 0; i < depth; i++)
+        {
+            indent += "|";
+
+            if (i == depth - 1)
+            {
+                indent += "-";
+            }
+            else
+            {
+                indent += " ";
+            }
+        }
+
+        if (root.Displayed && !string.IsNullOrEmpty(root.TagName))
+        {
+            string message;
+
+            if (string.IsNullOrEmpty(root.Text))
+            {
+                message = $"{indent}{root.TagName}";
+            }
+            else
+            {
+                message = $"{indent}{root.TagName} [{root.Text}]";
+            }
+
+            Logger.LogMessage(message.Replace("{", "{{").Replace("}","}}"));
+        }
+
+        foreach (WindowsElement child in root.FindElementsByXPath("*/*"))
+        {
+            DumpTreeHelper(child, root.Displayed ? depth + 1 : depth);
+        }
+    }
+
+    private static void TryInitializeSession()
+    {
+        AppiumOptions appiumOptions = new AppiumOptions();
+        appiumOptions.AddAdditionalCapability("app", WinUIGalleryAppIDs[appIdIndex]);
+        appiumOptions.AddAdditionalCapability("deviceName", "WindowsPC");
+        try
+        {
+            _session = new WindowsDriver<WindowsElement>(new Uri(WindowsApplicationDriverUrl), appiumOptions);
+        }
+        catch (OpenQA.Selenium.WebDriverException exc)
+        {
+            // Use next app ID since the current one was failing
+            if (exc.Message.Contains("Package was not found"))
+            {
+                appIdIndex++;
+            }
+            else
+            {
+                Console.WriteLine("Failed to update start driver, got exception:" + exc.Message);
+            }
+        }
+    }
+}
+
+
+--- End of SessionManager.cs ---
+
+File: TestBase.cs
+﻿//******************************************************************************
+//
+// Copyright (c) 2024 Microsoft Corporation. All rights reserved.
+//
+// This code is licensed under the MIT License (MIT).
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+//
+//******************************************************************************
+
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using OpenQA.Selenium.Appium.Windows;
+using OpenQA.Selenium.Interactions;
+using System.Linq;
+using System.Threading;
+
+namespace WinUIGallery.UITests;
+
+public class TestBase
+{
+	public static WindowsDriver<WindowsElement> Session => SessionManager.Session;
+
+	public static void OpenControlPage(string name)
+	{
+		var search = Session.FindElementByName("Search");
+		search.Clear();
+
+		search.SendKeys(name);
+		GetElementByName(name).Click();
+
+		Assert.IsNotNull(WaitForPageHeader(name), "Failed to find matching page header for page: " + name);
+	}
+
+	public static WindowsElement GetElementByName(string name)
+	{
+		for (int i = 0; i < 100; i++)
+		{
+			Thread.Sleep(50);
+			var element = Session.FindElementByName(name);
+			if (element != null)
+			{
+				return element;
+			}
+		}
+		return null;
+	}
+	private static WindowsElement WaitForPageHeader(string name)
+	{
+		for (int i = 0; i < 100; i++)
+		{
+			var header = Session.FindElementByAccessibilityId("PageHeader");
+			if (header != null && header.Text == name)
+			{
+				return header;
+			}
+			Thread.Sleep(50);
+		}
+		return null;
+	}
+
+	public static void TypeText(string text)
+	{
+		var actions = new Actions(Session);
+		actions.SendKeys(text).Perform();
+	}
+}
+
+--- End of TestBase.cs ---
+
+File: WinUIGallery.UITests.csproj
+﻿<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <TargetFramework>net8.0</TargetFramework>
+        <RootNamespace>WinUIGallery.UITests</RootNamespace>
+        <IsPackable>false</IsPackable>
+        <Configurations>Debug;Release;Sideload;Stable;Preview;Store</Configurations>
+        <Platforms>x86;x64;arm64</Platforms>
+        <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Appium.WebDriver" Version="4.4.0" />
+        <PackageReference Include="Axe.Windows" Version="2.4.1" />
+        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.5.0" />
+        <PackageReference Include="MSTest.TestAdapter" Version="3.0.2" />
+        <PackageReference Include="MSTest.TestFramework" Version="3.0.2" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <None Include="$(MSBuildThisFileDirectory)..\WinUIGallery\Samples\Data\ControlInfoData.json">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </None>
+    </ItemGroup>
+
+</Project>
+--- End of WinUIGallery.UITests.csproj ---
+
+File: ./Tests/Button.cs
+﻿//******************************************************************************
+//
+// Copyright (c) 2024 Microsoft Corporation. All rights reserved.
+//
+// This code is licensed under the MIT License (MIT).
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+//
+//******************************************************************************
+
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using OpenQA.Selenium.Appium.Windows;
+
+namespace WinUIGallery.UITests.Tests;
+
+[TestClass]
+public class Button : TestBase
+{
+    private static WindowsElement buttonElement = null;
+
+    [ClassInitialize]
+    public static void ClassInitialize(TestContext context)
+    {
+        OpenControlPage("Button");
+			buttonElement = Session.FindElementByAccessibilityId("Button1");
+        Assert.IsNotNull(buttonElement);
+    }
+
+		[TestMethod]
+    public void Button_Click()
+    {
+
+        var buttonEventOutput = Session.FindElementByAccessibilityId("Control1Output");
+        Assert.AreEqual(string.Empty, buttonEventOutput.Text);
+
+        buttonElement.Click();
+
+        Assert.AreEqual("You clicked: Button1", buttonEventOutput.Text);
+    }
+
+    [TestMethod]
+    public void Displayed()
+    {
+        Assert.IsTrue(buttonElement.Displayed);
+    }
+
+    [TestMethod]
+    public void Enabled()
+    {
+        var disableButtonCheckbox = Session.FindElementByAccessibilityId("DisableButton1");
+        Assert.IsTrue(buttonElement.Enabled);
+        disableButtonCheckbox.Click();
+        Assert.IsFalse(buttonElement.Enabled);
+        disableButtonCheckbox.Click();
+        Assert.IsTrue(buttonElement.Enabled);
+    }
+
+    [TestMethod]
+    public void Name()
+    {
+        Assert.AreEqual("ControlType.Button", buttonElement.TagName);
+    }
+
+    [TestMethod]
+    public void Size()
+    {
+        Assert.IsTrue(buttonElement.Size.Width > 0);
+        Assert.IsTrue(buttonElement.Size.Height > 0);
+    }
+
+    [TestMethod]
+    public void Text()
+    {
+        Assert.AreEqual("Standard XAML", buttonElement.Text);
+    }
+}
+--- End of ./Tests/Button.cs ---
+
+File: ./Tests/MediaPlayerElement.cs
+//******************************************************************************
+//
+// Copyright (c) 2024 Microsoft Corporation. All rights reserved.
+//
+// This code is licensed under the MIT License (MIT).
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+//
+//******************************************************************************
+
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using OpenQA.Selenium.Appium.Windows;
+using System.Threading;
+
+namespace WinUIGallery.UITests.Tests;
+
+[TestClass]
+public class MediaPlayerElement : TestBase
+{
+
+    [ClassInitialize]
+    public static void ClassInitialize(TestContext context)
+    {
+        // Doing this manually due to keyboard layout issues surrounding y and z
+        var search = Session.FindElementByName("Search");
+        search.Clear();
+        Thread.Sleep(1_000);
+        search.SendKeys("MediaPla");
+        GetElementByName("MediaPlayerElement").Click();
+    }
+
+    [TestMethod]
+    public void PlayMedia()
+    {
+        WindowsElement play = Session.FindElementByAccessibilityId("PlayPauseButton");
+        Assert.IsNotNull(play);
+        Assert.IsNotNull(Session.FindElementByAccessibilityId("svPanel"));
+
+        // Play the video
+        play.Click();
+        Thread.Sleep(1000);
+        
+        // Pause the video
+        play.Click();
+    }
+}
+
+--- End of ./Tests/MediaPlayerElement.cs ---
+
+File: ./Tests/PersonPicture.cs
+﻿//******************************************************************************
+//
+// Copyright (c) 2024 Microsoft Corporation. All rights reserved.
+//
+// This code is licensed under the MIT License (MIT).
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+//
+//******************************************************************************
+
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using System.Threading;
+
+namespace WinUIGallery.UITests.Tests;
+
+[TestClass]
+public class PersonPicture : TestBase
+{
+	[ClassInitialize]
+	public static void ClassInitialize(TestContext context)
+	{
+		OpenControlPage("PersonPicture");
+	}
+
+	[TestMethod]
+	public void SwitchOptions()
+	{
+		GetElementByName("Profile Image").Click();
+		GetElementByName("Display Name").Click();
+		GetElementByName("Initials").Click();
+	}
+}
+
+--- End of ./Tests/PersonPicture.cs ---
+
+File: ./Tests/ProgressBar.cs
+﻿//******************************************************************************
+//
+// Copyright (c) 2024 Microsoft Corporation. All rights reserved.
+//
+// This code is licensed under the MIT License (MIT).
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+//
+//******************************************************************************
+
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using OpenQA.Selenium.Appium.Windows;
+using System.Threading;
+
+namespace WinUIGallery.UITests.Tests;
+
+[TestClass]
+public class ProgressBar : TestBase
+{
+    private static WindowsElement progressBarElement = null;
+    private static WindowsElement clickAndHoldButton = null;
+
+    [ClassInitialize]
+    public static void ClassInitialize(TestContext context)
+    {
+        OpenControlPage("ProgressBar");
+        progressBarElement = Session.FindElementByAccessibilityId("ProgressBar2");
+        Assert.IsNotNull(progressBarElement);
+        // Numberbox is a spinner, thus "Increase" is the button we need
+        clickAndHoldButton = Session.FindElementByName("Increase");
+        Assert.IsNotNull(clickAndHoldButton);
+    }
+
+    [TestMethod]
+    public void Displayed()
+    {
+        Assert.IsTrue(progressBarElement.Displayed);
+    }
+
+    [TestMethod]
+    public void Enabled()
+    {
+        Assert.IsTrue(progressBarElement.Enabled);
+    }
+
+    [TestMethod]
+    public void Location()
+    {
+        Assert.IsTrue(clickAndHoldButton.Location.X >= progressBarElement.Location.X);
+        Assert.IsTrue(clickAndHoldButton.Location.Y <= progressBarElement.Location.Y);
+    }
+
+    [TestMethod]
+    public void LocationInView()
+    {
+        Assert.IsTrue(clickAndHoldButton.LocationOnScreenOnceScrolledIntoView.X >= progressBarElement.LocationOnScreenOnceScrolledIntoView.X);
+        Assert.IsTrue(clickAndHoldButton.LocationOnScreenOnceScrolledIntoView.Y <= progressBarElement.LocationOnScreenOnceScrolledIntoView.Y);
+    }
+
+    [TestMethod]
+    public void Name()
+    {
+        Assert.AreEqual("ControlType.ProgressBar", progressBarElement.TagName);
+    }
+
+    [TestMethod]
+    public void Size()
+    {
+        Assert.IsTrue(progressBarElement.Size.Width > 0);
+        Assert.IsTrue(progressBarElement.Size.Height > 0);
+    }
+
+    [TestMethod]
+    public void Text()
+    {
+        var originalValue = int.Parse(progressBarElement.Text);
+        Assert.IsTrue(originalValue >= 0);
+        clickAndHoldButton.Click();
+        Assert.AreEqual(originalValue + 1, int.Parse(progressBarElement.Text));
+        clickAndHoldButton.Click();
+        Assert.AreEqual(originalValue + 2, int.Parse(progressBarElement.Text));
+    }
+}
+
+--- End of ./Tests/ProgressBar.cs ---
+
+File: ./Tests/Slider.cs
+﻿//******************************************************************************
+//
+// Copyright (c) 2024 Microsoft Corporation. All rights reserved.
+//
+// This code is licensed under the MIT License (MIT).
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+//
+//******************************************************************************
+
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using OpenQA.Selenium;
+using OpenQA.Selenium.Appium.Windows;
+
+namespace WinUIGallery.UITests.Tests;
+
+[TestClass]
+public class Slider : TestBase
+{
+    private static WindowsElement sliderElement1 = null;
+    private static WindowsElement sliderElement2 = null;
+
+    [ClassInitialize]
+    public static void ClassInitialize(TestContext context)
+    {
+        OpenControlPage("Slider");
+        sliderElement1 = Session.FindElementByAccessibilityId("Slider1");
+        Assert.IsNotNull(sliderElement1);
+        sliderElement2 = Session.FindElementByAccessibilityId("Slider2");
+        Assert.IsNotNull(sliderElement2);
+    }
+
+    [TestMethod]
+    public void Click()
+    {
+        sliderElement1.Click();
+        Assert.IsTrue(int.Parse(sliderElement1.Text) > 45); // The value of the slider when the center is clicked should be greater than 45 and close to 50
+
+        sliderElement2.Click();
+        Assert.AreEqual("750", sliderElement2.Text);  // The value of the slider when the center is clicked
+    }
+
+    [TestMethod]
+    public void Displayed()
+    {
+        Assert.IsTrue(sliderElement1.Displayed);
+        Assert.IsTrue(sliderElement2.Displayed);
+    }
+
+    [TestMethod]
+    public void Enabled()
+    {
+        Assert.IsTrue(sliderElement1.Enabled);
+        Assert.IsTrue(sliderElement2.Enabled);
+    }
+
+    [TestMethod]
+    public void Location()
+    {
+        Assert.IsTrue(sliderElement1.Location.X >= sliderElement1.Location.X);
+        Assert.IsTrue(sliderElement1.Location.Y >= sliderElement1.Location.Y);
+    }
+
+    [TestMethod]
+    public void LocationInView()
+    {
+        Assert.IsTrue(sliderElement2.LocationOnScreenOnceScrolledIntoView.X >= sliderElement1.LocationOnScreenOnceScrolledIntoView.X);
+        Assert.IsTrue(sliderElement2.LocationOnScreenOnceScrolledIntoView.Y >= sliderElement1.LocationOnScreenOnceScrolledIntoView.Y);
+    }
+
+    [TestMethod]
+    public void Name()
+    {
+        Assert.AreEqual("ControlType.Slider", sliderElement1.TagName);
+        Assert.AreEqual("ControlType.Slider", sliderElement2.TagName);
+    }
+
+    [TestMethod]
+    public void SendKeys()
+    {
+        var originalValue = sliderElement1.Text;
+        // Pressing right arrow will move the slider right and the value should increase by 1
+        sliderElement1.SendKeys(Keys.Right);
+        Assert.AreEqual(int.Parse(originalValue) + 1, int.Parse(sliderElement1.Text));
+        // Pressing left arrow will move the slider back to the original value
+        sliderElement1.SendKeys(Keys.Left);
+        Assert.AreEqual(originalValue, sliderElement1.Text);
+    }
+
+    [TestMethod]
+    public void Size()
+    {
+        Assert.IsTrue(sliderElement1.Size.Width > 0);
+        Assert.IsTrue(sliderElement1.Size.Height > 0);
+    }
+
+    [TestMethod]
+    public void Text()
+    {
+        sliderElement1.Click();
+        Assert.IsTrue(int.Parse(sliderElement1.Text) > 45); // The value of the slider when the center is clicked should be greater than 45 and close to 50
+
+        sliderElement2.Click();
+        Assert.AreEqual(750, int.Parse(sliderElement2.Text)); // The value of the slider when the center is clicked should be 750
+    }
+}
+
+--- End of ./Tests/Slider.cs ---
+
+File: ./Tests/TextBlock.cs
+﻿//******************************************************************************
+//
+// Copyright (c) 2024 Microsoft Corporation. All rights reserved.
+//
+// This code is licensed under the MIT License (MIT).
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+//
+//******************************************************************************
+
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using OpenQA.Selenium.Appium.Windows;
+
+using System.Threading;
+
+namespace WinUIGallery.UITests.Tests;
+
+[TestClass]
+public class TextBlock : TestBase
+{
+    private static WindowsElement textBlockElement1 = null;
+    private static WindowsElement textBlockElement2 = null;
+
+    [ClassInitialize]
+    public static void ClassInitialize(TestContext context)
+    {
+        OpenControlPage("TextBlock");
+        textBlockElement1 = Session.FindElementByName("I am a TextBlock.");
+        Assert.IsNotNull(textBlockElement1);
+        textBlockElement2 = Session.FindElementByName("I am a styled TextBlock.");
+        Assert.IsNotNull(textBlockElement2);
+    }
+
+    [TestMethod]
+    public void Displayed()
+    {
+        Assert.IsTrue(textBlockElement1.Displayed);
+        Assert.IsTrue(textBlockElement2.Displayed);
+    }
+
+    [TestMethod]
+    public void Enabled()
+    {
+        Assert.IsTrue(textBlockElement1.Enabled);
+        Assert.IsTrue(textBlockElement1.Enabled);
+    }
+
+    [TestMethod]
+    public void Location()
+    {
+        Assert.IsTrue(textBlockElement2.Location.X >= textBlockElement1.Location.X);
+        Assert.IsTrue(textBlockElement2.Location.Y >= textBlockElement1.Location.Y);
+    }
+
+    [TestMethod]
+    public void LocationInView()
+    {
+        Assert.IsTrue(textBlockElement2.LocationOnScreenOnceScrolledIntoView.X >= textBlockElement1.LocationOnScreenOnceScrolledIntoView.X);
+        Assert.IsTrue(textBlockElement2.LocationOnScreenOnceScrolledIntoView.Y >= textBlockElement1.LocationOnScreenOnceScrolledIntoView.Y);
+    }
+
+    [TestMethod]
+    public void Name()
+    {
+        Assert.AreEqual("ControlType.Text", textBlockElement1.TagName);
+        Assert.AreEqual("ControlType.Text", textBlockElement2.TagName);
+    }
+
+    [TestMethod]
+    public void Size()
+    {
+        Assert.IsTrue(textBlockElement1.Size.Width > 0);
+        Assert.IsTrue(textBlockElement1.Size.Height > 0);
+        Assert.IsTrue(textBlockElement2.Size.Width >= textBlockElement1.Size.Width);
+        Assert.IsTrue(textBlockElement2.Size.Height >= textBlockElement1.Size.Height);
+    }
+
+    [TestMethod]
+    public void Text()
+    {
+        Assert.AreEqual("I am a TextBlock.", textBlockElement1.Text);
+        Assert.AreEqual("I am a styled TextBlock.", textBlockElement2.Text);
+    }
+}
+
+--- End of ./Tests/TextBlock.cs ---
+
+File: ./Tests/TextBox.cs
+﻿//******************************************************************************
+//
+// Copyright (c) 2024 Microsoft Corporation. All rights reserved.
+//
+// This code is licensed under the MIT License (MIT).
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+//
+//******************************************************************************
+
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using OpenQA.Selenium;
+using OpenQA.Selenium.Appium.Windows;
+
+using System.Threading;
+
+namespace WinUIGallery.UITests.Tests;
+
+[TestClass]
+public class TextBox : TestBase
+{
+    private static WindowsElement textBoxElement1 = null;
+    private static WindowsElement textBoxElement2 = null;
+
+    [ClassInitialize]
+    public static void ClassInitialize(TestContext context)
+    {
+        OpenControlPage("TextBox");
+        textBoxElement1 = Session.FindElementByName("simple TextBox");
+        textBoxElement2 = Session.FindElementByName("Enter your name:");
+        Assert.IsNotNull(textBoxElement1);
+        Assert.IsNotNull(textBoxElement2);
+    }
+
+    [TestMethod]
+    public void Clear()
+    {
+        textBoxElement1.Clear();
+        Assert.AreEqual(string.Empty, textBoxElement1.Text);
+        textBoxElement1.SendKeys("F");
+        Assert.AreEqual("F", textBoxElement1.Text);
+        textBoxElement1.Clear();
+        Assert.AreEqual(string.Empty, textBoxElement1.Text);
+    }
+
+    [TestMethod]
+    public void Click()
+    {
+        // Click textBoxElement1 to set focus and arbitrarily type
+        textBoxElement1.Clear();
+        Assert.AreEqual(string.Empty, textBoxElement1.Text);
+        textBoxElement1.Click();
+        Thread.Sleep(1_000);
+        TypeText("1");
+        Assert.AreEqual("1", textBoxElement1.Text);
+
+        // Click textBoxElement2 to set focus and arbitrarily type
+        textBoxElement2.Clear();
+        Assert.AreEqual(string.Empty, textBoxElement2.Text);
+        textBoxElement2.Click();
+        Thread.Sleep(1_000);
+        TypeText("1");
+        Assert.AreEqual("1", textBoxElement2.Text);
+    }
+
+    [TestMethod]
+    public void Displayed()
+    {
+        Assert.IsTrue(textBoxElement1.Displayed);
+        Assert.IsTrue(textBoxElement2.Displayed);
+    }
+
+    [TestMethod]
+    public void Enabled()
+    {
+        Assert.IsTrue(textBoxElement1.Enabled);
+        Assert.IsTrue(textBoxElement2.Enabled);
+    }
+
+    [TestMethod]
+    public void Location()
+    {
+        Assert.IsTrue(textBoxElement2.Location.X >= textBoxElement1.Location.X);
+        Assert.IsTrue(textBoxElement2.Location.Y >= textBoxElement1.Location.Y);
+    }
+
+    [TestMethod]
+    public void LocationInView()
+    {
+        Assert.IsTrue(textBoxElement2.LocationOnScreenOnceScrolledIntoView.X >= textBoxElement1.LocationOnScreenOnceScrolledIntoView.X);
+        Assert.IsTrue(textBoxElement2.LocationOnScreenOnceScrolledIntoView.Y >= textBoxElement1.LocationOnScreenOnceScrolledIntoView.Y);
+    }
+
+    [TestMethod]
+    public void Name()
+    {
+        Assert.AreEqual("ControlType.Edit", textBoxElement1.TagName);
+        Assert.AreEqual("ControlType.Edit", textBoxElement2.TagName);
+    }
+
+    [TestMethod]
+    public void SendKeys()
+    {
+        textBoxElement1.Clear();
+        Assert.AreEqual(string.Empty, textBoxElement1.Text);
+        textBoxElement1.SendKeys("A");
+        Assert.AreEqual("A", textBoxElement1.Text);
+
+        // Use Ctrl + A to select all text and backspace to clear the box
+        textBoxElement1.SendKeys(Keys.Control + "a" + Keys.Control + Keys.Backspace);
+        Assert.AreEqual(string.Empty, textBoxElement1.Text);
+
+        textBoxElement2.Clear();
+        Assert.AreEqual(string.Empty, textBoxElement2.Text);
+        textBoxElement2.SendKeys("E");
+        Assert.AreEqual("E", textBoxElement2.Text);
+    }
+
+    [TestMethod]
+    public void Text()
+    {
+        textBoxElement1.Clear();
+        Assert.AreEqual(string.Empty, textBoxElement1.Text);
+        textBoxElement1.SendKeys("A");
+        Assert.AreEqual("A", textBoxElement1.Text);
+    }
+}
+
+--- End of ./Tests/TextBox.cs ---
+
+File: ./Tests/ToggleButton.cs
+﻿//******************************************************************************
+//
+// Copyright (c) 2024 Microsoft Corporation. All rights reserved.
+//
+// This code is licensed under the MIT License (MIT).
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+//
+//******************************************************************************
+
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using OpenQA.Selenium.Appium.Windows;
+using System.Threading;
+
+namespace WinUIGallery.UITests.Tests;
+
+[TestClass]
+public class ToggleButton : TestBase
+{
+    private static WindowsElement toggleButtonElement = null;
+
+    [ClassInitialize]
+    public static void ClassInitialize(TestContext context)
+    {
+        OpenControlPage("ToggleButton");
+        toggleButtonElement = Session.FindElementByAccessibilityId("Toggle1");
+        Assert.IsNotNull(toggleButtonElement);
+    }
+
+    [TestMethod]
+    public void Click()
+    {
+        var buttonEventOutput = Session.FindElementByAccessibilityId("Control1Output");
+        Assert.AreEqual("Off", buttonEventOutput.Text);
+
+        toggleButtonElement.Click();
+        Assert.AreEqual("On", buttonEventOutput.Text);
+        toggleButtonElement.Click();
+        Assert.AreEqual("Off", buttonEventOutput.Text);
+    }
+
+    [TestMethod]
+    public void Displayed()
+    {
+        Assert.IsTrue(toggleButtonElement.Displayed);
+    }
+
+    [TestMethod]
+    public void Enabled()
+    {
+        var disableButtonCheckbox = Session.FindElementByAccessibilityId("DisableToggle1");
+        Assert.IsTrue(toggleButtonElement.Enabled);
+
+        disableButtonCheckbox.Click();
+        Assert.IsFalse(toggleButtonElement.Enabled);
+
+        disableButtonCheckbox.Click();
+        Assert.IsTrue(toggleButtonElement.Enabled);
+    }
+
+    [TestMethod]
+    public void Name()
+    {
+        Assert.AreEqual("ControlType.Button", toggleButtonElement.TagName);
+    }
+
+    [TestMethod]
+    public void Selected()
+    {
+        toggleButtonElement.Click();
+        Assert.IsTrue(toggleButtonElement.Selected);
+
+        toggleButtonElement.Click();
+        Assert.IsFalse(toggleButtonElement.Selected);
+    }
+
+    [TestMethod]
+    public void Size()
+    {
+        Assert.IsTrue(toggleButtonElement.Size.Width > 0);
+        Assert.IsTrue(toggleButtonElement.Size.Height > 0);
+    }
+
+    [TestMethod]
+    public void Text()
+    {
+        Assert.AreEqual("ToggleButton", toggleButtonElement.Text);
+    }
+}
+
+--- End of ./Tests/ToggleButton.cs ---
+
